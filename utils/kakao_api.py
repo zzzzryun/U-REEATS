@@ -25,6 +25,7 @@ from config.settings import (
     KAKAO_REST_API_KEY,
     KAKAO_LOCAL_API_URL,
     KAKAO_GEOCODE_API_URL,
+    KAKAO_REVERSE_GEOCODE_API_URL,
     KAKAO_MAP_BASE_URL,
     DEFAULT_SEARCH_RADIUS,
     MAX_SEARCH_RADIUS
@@ -39,7 +40,16 @@ KAKAO_HEADERS = {
 }
 
 # 모의(Mock) API 사용 여부 (API 키 미설정 시 자동 활성화)
-USE_MOCK_API = (KAKAO_REST_API_KEY == "YOUR_KAKAO_REST_API_KEY_HERE")
+USE_MOCK_API = (
+    not KAKAO_REST_API_KEY
+    or KAKAO_REST_API_KEY.strip() == ""
+    or KAKAO_REST_API_KEY == "YOUR_KAKAO_REST_API_KEY_HERE"
+)
+
+if USE_MOCK_API:
+    print("  ℹ️  [kakao_api] 카카오 API 키가 설정되지 않아 목업(Mock) 데이터를 사용합니다.")
+else:
+    print(f"  ℹ️  [kakao_api] 카카오 API 키 인식됨 (앞 6자리: {KAKAO_REST_API_KEY[:6]}...)")
 
 
 def search_stores_by_keyword(
@@ -154,12 +164,24 @@ def geocode_address(address: str) -> Optional[dict]:
             params=params,
             timeout=5
         )
-        response.raise_for_status()
+
+        # ── 인증 실패(401) 등 HTTP 오류를 명확히 콘솔에 표시 ──
+        if response.status_code == 401:
+            print(f"  ⚠️  카카오 API 인증 실패 (401): API 키를 확인하세요.")
+            print(f"      응답 내용: {response.text[:200]}")
+            return _get_mock_coordinates(address)
+
+        if response.status_code != 200:
+            print(f"  ⚠️  카카오 API 오류 (status={response.status_code})")
+            print(f"      응답 내용: {response.text[:200]}")
+            return _get_mock_coordinates(address)
+
         data = response.json()
 
         documents = data.get("documents", [])
         if not documents:
-            logger.warning(f"주소 검색 결과 없음: '{address}'")
+            print(f"  ⚠️  주소 검색 결과 없음: '{address}'")
+            print(f"      → 더 구체적인 지번/도로명 주소로 입력해보세요 (예: '서울 강남구 역삼동')")
             return None
 
         doc = documents[0]
@@ -169,9 +191,147 @@ def geocode_address(address: str) -> Optional[dict]:
             "address": doc.get("address_name", address)
         }
 
-    except Exception as e:
-        logger.error(f"지오코딩 오류: {e}")
+    except requests.exceptions.ConnectionError:
+        print(f"  ⚠️  카카오 API 연결 실패: 네트워크 또는 방화벽을 확인하세요.")
         return _get_mock_coordinates(address)
+
+    except Exception as e:
+        print(f"  ⚠️  지오코딩 처리 중 오류 발생: {type(e).__name__}: {e}")
+        return _get_mock_coordinates(address)
+
+
+def reverse_geocode(latitude: float, longitude: float) -> Optional[dict]:
+    """
+    위도/경도 좌표를 사람이 읽을 수 있는 주소로 변환 (역지오코딩)
+
+    브라우저 Geolocation API로 받은 좌표는 숫자뿐이라,
+    사용자에게 "여기가 맞나요?" 라고 확인시켜주려면 주소 변환이 필요함
+
+    Args:
+        latitude: 위도
+        longitude: 경도
+
+    Returns:
+        Optional[dict]: 성공 시 {'address': str}
+                        실패 시 None (호출하는 쪽에서 좌표만으로 진행 가능)
+    """
+    if USE_MOCK_API:
+        return {"address": f"위도 {latitude:.4f}, 경도 {longitude:.4f} 부근"}
+
+    try:
+        params = {"x": str(longitude), "y": str(latitude)}
+        response = requests.get(
+            KAKAO_REVERSE_GEOCODE_API_URL,
+            headers=KAKAO_HEADERS,
+            params=params,
+            timeout=5
+        )
+
+        if response.status_code != 200:
+            print(f"  ⚠️  주소 변환 API 오류 (status={response.status_code})")
+            return None
+
+        data = response.json()
+        documents = data.get("documents", [])
+        if not documents:
+            return None
+
+        # 도로명 주소 우선, 없으면 지번 주소 사용
+        doc = documents[0]
+        road_addr = doc.get("road_address")
+        region_addr = doc.get("address")
+
+        if road_addr:
+            address = road_addr.get("address_name", "")
+        elif region_addr:
+            address = region_addr.get("address_name", "")
+        else:
+            address = f"위도 {latitude:.4f}, 경도 {longitude:.4f} 부근"
+
+        return {"address": address}
+
+    except Exception as e:
+        print(f"  ⚠️  주소 변환 중 오류: {type(e).__name__}: {e}")
+        return None
+
+
+def get_current_location_by_ip() -> Optional[dict]:
+    """
+    사용자의 공인 IP 주소를 기반으로 현재 위치(대략적인 좌표)를 추정하는 함수
+
+    동작 원리:
+    - GPS가 없는 PC 콘솔 앱에서는 사용자의 정밀한 위치를 직접 알 수 없음
+    - 대신 사용자의 공인 IP가 어느 통신사/지역에 할당되어 있는지로 위치를 추정
+    - 정확도는 보통 '시/구' 단위 (예: '서울 강남구') - GPS보다는 부정확하지만
+      모바일 기기 없이도 동작하는 표준적인 방법
+
+    폴백 전략:
+    1차로 ipapi.co 시도 → 실패하면 2차로 ip-api.com 시도 → 둘 다 실패하면 None 반환
+
+    Returns:
+        Optional[dict]: 성공 시 {'latitude': float, 'longitude': float,
+                                  'address': str, 'city': str}
+                        실패 시 None (호출하는 쪽에서 기본 위치로 대체해야 함)
+    """
+    # ── 1차 시도: ipapi.co ─────────────────────────
+    try:
+        response = requests.get("https://ipapi.co/json/", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if not data.get("error"):
+                latitude = data.get("latitude")
+                longitude = data.get("longitude")
+                city = data.get("city", "")
+                region = data.get("region", "")
+
+                if latitude and longitude:
+                    address = f"{region} {city}".strip() or "현재 위치"
+                    print(f"  📡 IP 기반 위치 감지 성공 (ipapi.co): {address}")
+                    return {
+                        "latitude": float(latitude),
+                        "longitude": float(longitude),
+                        "address": address,
+                        "city": city
+                    }
+        print(f"  ⚠️  ipapi.co 응답 이상 (status={response.status_code}). 2차 서비스로 재시도합니다.")
+    except requests.exceptions.ConnectionError:
+        print(f"  ⚠️  ipapi.co 연결 실패. 2차 서비스로 재시도합니다.")
+    except Exception as e:
+        print(f"  ⚠️  ipapi.co 처리 중 오류: {type(e).__name__}. 2차 서비스로 재시도합니다.")
+
+    # ── 2차 시도: ip-api.com (1차 실패 시 폴백) ──────
+    try:
+        response = requests.get(
+            "http://ip-api.com/json/",
+            params={"lang": "ko"},
+            timeout=5
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("status") == "success":
+                latitude = data.get("lat")
+                longitude = data.get("lon")
+                city = data.get("city", "")
+                region = data.get("regionName", "")
+
+                if latitude and longitude:
+                    address = f"{region} {city}".strip() or "현재 위치"
+                    print(f"  📡 IP 기반 위치 감지 성공 (ip-api.com): {address}")
+                    return {
+                        "latitude": float(latitude),
+                        "longitude": float(longitude),
+                        "address": address,
+                        "city": city
+                    }
+        print(f"  ⚠️  ip-api.com 응답 이상 (status={response.status_code})")
+    except requests.exceptions.ConnectionError:
+        print(f"  ⚠️  ip-api.com 연결도 실패했습니다.")
+    except Exception as e:
+        print(f"  ⚠️  ip-api.com 처리 중 오류: {type(e).__name__}: {e}")
+
+    # 두 서비스 모두 실패
+    print(f"  ⚠️  IP 기반 위치 감지에 실패했습니다. (사내망/VPN 환경에서는 흔한 현상입니다)")
+    return None
 
 
 def build_kakao_map_url(store_name: str, latitude: float, longitude: float) -> str:

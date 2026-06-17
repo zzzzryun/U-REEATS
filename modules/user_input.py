@@ -193,7 +193,7 @@ def select_location() -> dict:
     print_subheader("📍  위치 입력")
     print("  어느 지역에서 식사하실 예정인가요?\n")
     print("  [1] 직접 주소/지역명 입력")
-    print("  [2] 서울 강남역 근처 (기본값 - 데모용)\n")
+    print("  [2] 내 위치 (자동 감지 - 브라우저 권한 필요)\n")
 
     choice = input("  선택: ").strip()
 
@@ -213,8 +213,66 @@ def select_location() -> dict:
         else:
             print_warning("주소를 찾을 수 없어 기본 위치를 사용합니다.")
             return _get_default_location()
+
+    elif choice == "2":
+        return _get_current_location_with_fallback()
+
     else:
-        return _get_default_location()
+        print_warning("올바른 선택이 아니어서 내 위치 자동 감지를 시도합니다.")
+        return _get_current_location_with_fallback()
+
+
+def _get_current_location_with_fallback() -> dict:
+    """
+    내 위치(자동 감지)를 시도하는 함수 - 3단계 폴백 구조
+
+    감지 우선순위:
+    1순위. 브라우저 위치 권한 (Wi-Fi 기반, 오차 10~50m) - 가장 정밀하지만 사용자 클릭 필요
+    2순위. IP 기반 추정 (오차 수 km, 시/구 단위) - 자동이지만 부정확
+    3순위. 기본 위치 (강남역) - 둘 다 실패했을 때 최후 수단
+
+    각 단계가 실패해도 프로그램이 멈추지 않고 다음 단계로 안전하게 넘어감
+
+    Returns:
+        dict: {'address': str, 'latitude': float, 'longitude': float}
+    """
+    # ── 1순위: 브라우저 정밀 위치 감지 ──────────────
+    print_info("브라우저를 통해 정밀 위치를 확인합니다. 잠시만 기다려주세요...")
+    print_info("브라우저 창에서 위치 권한 팝업이 뜨면 '허용'을 눌러주세요.\n")
+
+    from utils.browser_location import get_precise_location_via_browser
+    precise_location = get_precise_location_via_browser(timeout_seconds=30)
+
+    if precise_location:
+        # 좌표만으로는 사람이 읽기 어려우니 주소로 변환 시도
+        from utils.kakao_api import reverse_geocode
+        address_info = reverse_geocode(
+            precise_location["latitude"],
+            precise_location["longitude"]
+        )
+        address = address_info["address"] if address_info else "현재 위치 (정밀 감지)"
+
+        print_info(f"감지된 위치: {address}")
+        return {
+            "address": address,
+            "latitude": precise_location["latitude"],
+            "longitude": precise_location["longitude"]
+        }
+
+    # ── 2순위: IP 기반 추정으로 폴백 ─────────────────
+    print_warning("정밀 위치 감지에 실패하여 IP 기반 추정으로 전환합니다.")
+
+    from utils.kakao_api import get_current_location_by_ip
+    ip_location = get_current_location_by_ip()
+
+    if ip_location:
+        print_info(f"감지된 위치: {ip_location['address']}")
+        print_warning("IP 기반 위치는 시/구 단위로 추정되며 실제 위치와 차이가 있을 수 있습니다.")
+        return ip_location
+
+    # ── 3순위: 기본 위치로 최종 대체 ─────────────────
+    print_warning("위치 자동 감지에 모두 실패하여 기본 위치를 사용합니다.")
+    return _get_default_location()
 
 
 def _get_default_location() -> dict:
