@@ -51,34 +51,51 @@ def initialize_app():
         print_info("초기화 완료!\n")
 
 
-def run_recommendation_flow(session_id: str, user_conditions: dict = None) -> str:
+def run_recommendation_flow(
+    session_id: str,
+    user_conditions: dict = None,
+    shown_menu_ids: set = None
+) -> tuple[str, dict, set]:
     """
     추천 흐름을 한 사이클 실행하는 함수
 
     Args:
         session_id: 현재 세션 ID
         user_conditions: 이미 수집된 조건 (None이면 새로 수집)
+        shown_menu_ids: 이번 세션에서 이미 1순위로 보여준 menu_id 집합
+            ('다른 메뉴로 다시 추천받기'를 눌렀을 때 같은 메뉴가
+             또 1순위로 나오지 않도록 점수 정렬에서 뒤로 미루는 데 사용)
 
     Returns:
-        str: 다음 행동 ('retry_same' / 'retry_new' / 'quit')
+        tuple[str, dict, set]:
+            - 다음 행동 ('retry_same' / 'retry_new' / 'quit')
+            - 이번 사이클에서 실제로 사용된 user_conditions
+            - 누적된 shown_menu_ids (이번에 보여준 메뉴까지 포함)
     """
+    shown_menu_ids = set(shown_menu_ids) if shown_menu_ids else set()
+
     # ── 1. 사용자 입력 수집 ───────────────────────
     if user_conditions is None:
         user_conditions = collect_all_user_input()
+        shown_menu_ids = set()  # 조건이 새로 바뀌었으니 이전 기록은 초기화
 
     # ── 2. 메뉴 추천 ─────────────────────────────
     print_header("🔍  메뉴 분석 중...")
-    recommended_menus, allergy_warnings = recommend_menu(user_conditions, top_n=3)
+    recommended_menus, allergy_warnings = recommend_menu(
+        user_conditions, top_n=3, exclude_menu_ids=shown_menu_ids
+    )
 
     if not recommended_menus:
         display_no_result_message(user_conditions)
-        return ask_retry_recommendation()
+        return ask_retry_recommendation(), user_conditions, shown_menu_ids
 
     # ── 3. 메뉴 결과 출력 ─────────────────────────
     display_recommended_menu(recommended_menus, allergy_warnings)
 
     # ── 4. 1순위 메뉴 기준으로 음식점 검색 ──────────
     top_menu = recommended_menus[0]
+    shown_menu_ids.add(top_menu["menu_id"])  # 이번에 보여준 1순위 메뉴를 기록
+
     print_header(f"📍  '{top_menu['menu_name']}' 주변 음식점 검색 중...")
 
     recommended_stores = get_restaurant_recommendation(top_menu, user_conditions)
@@ -100,7 +117,7 @@ def run_recommendation_flow(session_id: str, user_conditions: dict = None) -> st
         print_info(f"추천 이력이 저장되었습니다. (ID: {history_id})")
 
     # ── 8. 다음 행동 선택 ─────────────────────────
-    return ask_retry_recommendation()
+    return ask_retry_recommendation(), user_conditions, shown_menu_ids
 
 
 def main():
@@ -116,28 +133,30 @@ def main():
 
     session_id = reset_user_session()
     user_conditions = None
+    shown_menu_ids = set()
     next_action = "start"
 
     while True:
         try:
             if next_action in ("start", "retry_new"):
-                # 조건을 새로 입력받는 경우
+                # 조건을 새로 입력받는 경우 → 이전에 보여준 메뉴 기록도 초기화
                 session_id = reset_user_session()
-                next_action = run_recommendation_flow(session_id, user_conditions=None)
+                next_action, user_conditions, shown_menu_ids = run_recommendation_flow(
+                    session_id, user_conditions=None, shown_menu_ids=None
+                )
 
             elif next_action == "retry_same":
                 # 같은 조건으로 다른 메뉴 추천
-                print_info("같은 조건으로 다시 추천합니다...\n")
-                next_action = run_recommendation_flow(session_id, user_conditions=user_conditions)
+                # (이전에 저장된 user_conditions, shown_menu_ids 그대로 재사용)
+                print_info("같은 조건으로 다른 메뉴를 추천합니다...\n")
+                next_action, user_conditions, shown_menu_ids = run_recommendation_flow(
+                    session_id, user_conditions=user_conditions, shown_menu_ids=shown_menu_ids
+                )
 
             elif next_action == "quit":
                 print_header("👋  U-RE EATS를 이용해 주셔서 감사합니다!")
                 print("  맛있는 식사 되세요 😊\n")
                 break
-
-            # 조건을 재사용하기 위해 저장 (retry_same 용)
-            # (실제로는 run_recommendation_flow 안에서 user_conditions를 반환하도록
-            #  리팩토링하는 것이 더 깔끔하지만, 학습 목적으로 단순하게 유지)
 
         except KeyboardInterrupt:
             print("\n\n  프로그램을 종료합니다.")

@@ -261,7 +261,8 @@ def _calculate_menu_score(menu: dict, analysis: dict) -> float:
 
 def recommend_menu(
     user_conditions: dict,
-    top_n: int = 3
+    top_n: int = 3,
+    exclude_menu_ids: set = None
 ) -> tuple[list[dict], list[str]]:
     """
     사용자 조건에 맞는 메뉴를 추천하는 메인 함수
@@ -269,12 +270,17 @@ def recommend_menu(
     Args:
         user_conditions: 사용자 입력 조건 딕셔너리
         top_n: 반환할 추천 메뉴 수
+        exclude_menu_ids: 이번 추천에서 제외할 menu_id 집합
+            ('다른 메뉴로 다시 추천받기'를 눌렀을 때, 이전에 이미 보여준
+             메뉴가 다시 1순위로 나오지 않도록 하기 위해 사용)
 
     Returns:
         tuple[list[dict], list[str]]:
             - 추천 메뉴 목록 (각 항목에 'reasons' 필드 포함)
             - 알레르기 경고 메뉴 목록
     """
+    exclude_menu_ids = exclude_menu_ids or set()
+
     # 1단계: 조건 분석
     analysis = analyze_conditions(user_conditions)
 
@@ -304,7 +310,20 @@ def recommend_menu(
         menu["reasons"] = generate_menu_recommendation_reasons(menu, analysis)
         scored_menus.append(menu)
 
-    scored_menus.sort(key=lambda m: m["score"], reverse=True)
+    # 이전에 이미 추천했던 메뉴는 점수와 무관하게 뒤로 미룸
+    # (단, 모든 메뉴가 제외 대상이라면 - 즉 더 보여줄 새 메뉴가 없다면 -
+    #  제외를 무시하고 원래 점수 순서 그대로 보여줌. 그래야 무한 루프 없이
+    #  '다시 추천받기'가 항상 결과를 반환할 수 있음)
+    non_excluded = [m for m in scored_menus if m["menu_id"] not in exclude_menu_ids]
+
+    if non_excluded:
+        excluded = [m for m in scored_menus if m["menu_id"] in exclude_menu_ids]
+        non_excluded.sort(key=lambda m: m["score"], reverse=True)
+        excluded.sort(key=lambda m: m["score"], reverse=True)
+        scored_menus = non_excluded + excluded
+    else:
+        # 모든 메뉴가 이미 추천된 적 있음 → 원래 점수 순서대로 보여줌
+        scored_menus.sort(key=lambda m: m["score"], reverse=True)
 
     # 6단계: 상위 N개 반환
     top_menus = scored_menus[:top_n]
