@@ -24,7 +24,7 @@ DATABASE_PATH = os.path.join(DATABASE_DIR, "u_re_eats.db")
 # 카카오 API 설정
 # 실제 사용 시: 카카오 개발자 콘솔(https://developers.kakao.com)에서 발급받은 키로 교체
 # ─────────────────────────────────────────────
-KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY", "YOUR_KAKAO_REST_API_KEY_HERE")
+KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY", "a729419c4305bdc8413cccb8ad8add25")
 KAKAO_LOCAL_API_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
 KAKAO_GEOCODE_API_URL = "https://dapi.kakao.com/v2/local/search/address.json"
 KAKAO_REVERSE_GEOCODE_API_URL = "https://dapi.kakao.com/v2/local/geo/coord2address.json"
